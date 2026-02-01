@@ -45,6 +45,7 @@ btw remove game-agent
 | `btw add <source>` | Install a workflow from GitHub or local path |
 | `btw list` | List installed workflows |
 | `btw inject <id>` | Inject workflow into current project |
+| `btw inject -i` | Interactive mode - toggle inject/remove workflows |
 | `btw update [id]` | Update workflow(s) from source |
 | `btw remove <id>` | Remove an installed workflow |
 
@@ -65,6 +66,9 @@ btw list --detailed
 
 # Inject for specific AI tool
 btw inject my-workflow --target cursor
+
+# Interactive mode - browse and toggle workflows
+btw inject --interactive
 
 # Update a workflow from its source
 btw update my-workflow
