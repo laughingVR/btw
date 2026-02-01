@@ -242,8 +242,9 @@ describe('PathResolver', () => {
       const result = pathResolver.resolveAiToolPaths(projectRoot, 'claude');
 
       expect(result.configPath).toBe(path.join(projectRoot, '.claude/settings.json'));
-      expect(result.instructionsPath).toBe(path.join(projectRoot, '.claude/instructions.md'));
+      expect(result.instructionsPath).toBe(path.join(projectRoot, 'CLAUDE.md'));
       expect(result.projectConfigPath).toBe(path.join(projectRoot, '.claude/project.json'));
+      expect(result.agentsPath).toBe(path.join(projectRoot, '.claude/agents'));
     });
 
     it('should resolve Cursor AI tool paths correctly', () => {

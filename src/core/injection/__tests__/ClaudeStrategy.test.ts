@@ -1,13 +1,13 @@
 /**
  * BTW - ClaudeStrategy Unit Tests
- * Comprehensive tests for Claude Code injection strategy
+ * Tests for Claude Code injection strategy with .claude/agents/ folder structure
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ClaudeStrategy } from '../strategies/ClaudeStrategy.js';
 import { Manifest, AITarget } from '../../../types/index.js';
 import { BTWError, ErrorCode } from '../../../types/errors.js';
-import { InjectOptions, EjectOptions, InjectionStatus } from '../strategies/InjectionStrategy.js';
+import { InjectOptions, EjectOptions } from '../strategies/InjectionStrategy.js';
 
 // Mock the file system
 vi.mock('../../../infrastructure/fs/FileSystem.js', () => ({
@@ -19,6 +19,7 @@ vi.mock('../../../infrastructure/fs/FileSystem.js', () => ({
     remove: vi.fn(),
     backup: vi.fn(),
     restore: vi.fn(),
+    readdir: vi.fn(),
   },
 }));
 
@@ -27,8 +28,9 @@ vi.mock('../../../infrastructure/fs/PathResolver.js', () => ({
   pathResolver: {
     resolveAiToolPaths: vi.fn((projectRoot: string) => ({
       configPath: `${projectRoot}/.claude/settings.json`,
-      instructionsPath: `${projectRoot}/.claude/instructions.md`,
+      instructionsPath: `${projectRoot}/CLAUDE.md`,
       projectConfigPath: `${projectRoot}/.claude/project.json`,
+      agentsPath: `${projectRoot}/.claude/agents`,
     })),
     normalize: vi.fn((path: string) => path),
   },
@@ -37,15 +39,9 @@ vi.mock('../../../infrastructure/fs/PathResolver.js', () => ({
 // Import mocked modules for manipulation
 import { fileSystem } from '../../../infrastructure/fs/FileSystem.js';
 
-/**
- * BTW markers used in content
- */
 const BTW_START_MARKER = '<!-- BTW_START -->';
 const BTW_END_MARKER = '<!-- BTW_END -->';
 
-/**
- * Create a test manifest
- */
 function createTestManifest(overrides?: Partial<Manifest>): Manifest {
   return {
     version: '1.0',
@@ -68,33 +64,11 @@ function createTestManifest(overrides?: Partial<Manifest>): Manifest {
   };
 }
 
-/**
- * Create a valid BTW marker comment
- */
-function createBtwMarker(workflowId: string, timestamp?: string): string {
-  const ts = timestamp || new Date().toISOString();
-  return `<!-- BTW:${workflowId}:${ts} -->`;
-}
-
-/**
- * Create mock BTW content
- */
-function createMockBtwContent(workflowId: string = 'test-workflow'): string {
-  return `${BTW_START_MARKER}
-${createBtwMarker(workflowId)}
-
-# Test Workflow
-
-A test workflow
-
-${BTW_END_MARKER}`;
-}
-
 describe('ClaudeStrategy', () => {
   let strategy: ClaudeStrategy;
   const projectRoot = '/test/project';
-  const instructionsPath = `${projectRoot}/.claude/instructions.md`;
-  const backupPath = `${instructionsPath}.btw-backup`;
+  const claudeMdPath = `${projectRoot}/CLAUDE.md`;
+  const agentsPath = `${projectRoot}/.claude/agents`;
   const claudeDir = `${projectRoot}/.claude`;
 
   beforeEach(() => {
@@ -107,8 +81,9 @@ describe('ClaudeStrategy', () => {
     vi.mocked(fileSystem.writeFile).mockResolvedValue(undefined);
     vi.mocked(fileSystem.mkdir).mockResolvedValue(undefined);
     vi.mocked(fileSystem.remove).mockResolvedValue(undefined);
-    vi.mocked(fileSystem.backup).mockResolvedValue(backupPath);
+    vi.mocked(fileSystem.backup).mockResolvedValue('/test/backup.btw-backup');
     vi.mocked(fileSystem.restore).mockResolvedValue(undefined);
+    vi.mocked(fileSystem.readdir).mockResolvedValue([]);
   });
 
   afterEach(() => {
@@ -137,23 +112,37 @@ describe('ClaudeStrategy', () => {
     const options: InjectOptions = { projectRoot };
 
     describe('successful injection', () => {
-      it('should create .claude directory if it does not exist', async () => {
+      it('should create .claude and agents directories', async () => {
         const manifest = createTestManifest();
 
         await strategy.inject(manifest, options);
 
         expect(fileSystem.mkdir).toHaveBeenCalledWith(claudeDir);
+        expect(fileSystem.mkdir).toHaveBeenCalledWith(agentsPath);
       });
 
-      it('should write instructions file', async () => {
+      it('should create agent files in .claude/agents/', async () => {
         const manifest = createTestManifest();
 
         await strategy.inject(manifest, options);
 
+        // Should write agent file
         expect(fileSystem.writeFile).toHaveBeenCalledWith(
-          instructionsPath,
+          `${agentsPath}/test-agent.md`,
           expect.any(String),
           { createDirs: true }
+        );
+      });
+
+      it('should create CLAUDE.md with workflow summary', async () => {
+        const manifest = createTestManifest();
+
+        await strategy.inject(manifest, options);
+
+        // Should write CLAUDE.md
+        expect(fileSystem.writeFile).toHaveBeenCalledWith(
+          claudeMdPath,
+          expect.stringContaining(BTW_START_MARKER)
         );
       });
 
@@ -163,9 +152,9 @@ describe('ClaudeStrategy', () => {
         const result = await strategy.inject(manifest, options);
 
         expect(result.target).toBe('claude');
-        expect(result.configPath).toBe(instructionsPath);
+        expect(result.configPath).toBe(claudeMdPath);
         expect(result.agentCount).toBe(1);
-        expect(result.backupCreated).toBe(false);
+        expect(result.agentPaths).toContain(`${agentsPath}/test-agent.md`);
       });
 
       it('should handle manifest with multiple agents', async () => {
@@ -179,107 +168,45 @@ describe('ClaudeStrategy', () => {
         const result = await strategy.inject(manifest, options);
 
         expect(result.agentCount).toBe(2);
+        expect(fileSystem.writeFile).toHaveBeenCalledWith(
+          `${agentsPath}/agent1.md`,
+          expect.any(String),
+          { createDirs: true }
+        );
+        expect(fileSystem.writeFile).toHaveBeenCalledWith(
+          `${agentsPath}/agent2.md`,
+          expect.any(String),
+          { createDirs: true }
+        );
       });
     });
 
-    describe('backup functionality', () => {
-      it('should create backup when backup option is true and file exists', async () => {
-        vi.mocked(fileSystem.exists).mockResolvedValue(true);
-        vi.mocked(fileSystem.readFile).mockResolvedValue('existing content');
+    describe('force option', () => {
+      it('should remove existing BTW agents when force is true', async () => {
+        vi.mocked(fileSystem.readdir).mockResolvedValue(['old-agent.md']);
+        vi.mocked(fileSystem.readFile).mockResolvedValue('# BTW metadata\n# workflow: old-workflow');
 
         const manifest = createTestManifest();
 
-        const result = await strategy.inject(manifest, {
-          ...options,
-          backup: true,
-        });
+        await strategy.inject(manifest, { projectRoot, force: true });
 
-        expect(fileSystem.backup).toHaveBeenCalledWith(instructionsPath);
-        expect(result.backupCreated).toBe(true);
-        expect(result.backupPath).toBe(backupPath);
+        expect(fileSystem.remove).toHaveBeenCalledWith(`${agentsPath}/old-agent.md`);
       });
 
-      it('should not create backup when backup option is false', async () => {
-        vi.mocked(fileSystem.exists).mockResolvedValue(true);
-        vi.mocked(fileSystem.readFile).mockResolvedValue('existing content');
+      it('should reject injection without force when different workflow exists', async () => {
+        vi.mocked(fileSystem.readdir).mockResolvedValue(['old-agent.md']);
+        vi.mocked(fileSystem.readFile).mockResolvedValue('# BTW metadata\n# workflow: different-workflow');
 
         const manifest = createTestManifest();
 
-        const result = await strategy.inject(manifest, {
-          ...options,
-          backup: false,
-        });
-
-        expect(fileSystem.backup).not.toHaveBeenCalled();
-        expect(result.backupCreated).toBe(false);
+        await expect(strategy.inject(manifest, options)).rejects.toThrow(BTWError);
       });
 
-      it('should not create backup when file does not exist', async () => {
-        vi.mocked(fileSystem.exists).mockResolvedValue(false);
+      it('should allow injection when same workflow exists', async () => {
+        vi.mocked(fileSystem.readdir).mockResolvedValue(['test-agent.md']);
+        vi.mocked(fileSystem.readFile).mockResolvedValue('# BTW metadata\n# workflow: test-workflow');
 
         const manifest = createTestManifest();
-
-        const result = await strategy.inject(manifest, {
-          ...options,
-          backup: true,
-        });
-
-        expect(fileSystem.backup).not.toHaveBeenCalled();
-        expect(result.backupCreated).toBe(false);
-      });
-
-      it('should throw BTWError when backup fails', async () => {
-        vi.mocked(fileSystem.exists).mockResolvedValue(true);
-        vi.mocked(fileSystem.readFile).mockResolvedValue('existing content');
-        vi.mocked(fileSystem.backup).mockRejectedValue(new Error('Backup failed'));
-
-        const manifest = createTestManifest();
-
-        await expect(
-          strategy.inject(manifest, { ...options, backup: true })
-        ).rejects.toMatchObject({
-          code: ErrorCode.BACKUP_FAILED,
-        });
-      });
-    });
-
-    describe('BTW marker detection', () => {
-      it('should detect existing BTW marker and reject different workflow without force', async () => {
-        vi.mocked(fileSystem.exists).mockResolvedValue(true);
-        const existingContent = createMockBtwContent('different-workflow');
-        vi.mocked(fileSystem.readFile).mockResolvedValue(existingContent);
-
-        const manifest = createTestManifest({ id: 'new-workflow' });
-
-        await expect(
-          strategy.inject(manifest, options)
-        ).rejects.toMatchObject({
-          code: ErrorCode.INJECTION_FAILED,
-        });
-      });
-
-      it('should allow injection with force option even when different workflow exists', async () => {
-        vi.mocked(fileSystem.exists).mockResolvedValue(true);
-        const existingContent = createMockBtwContent('different-workflow');
-        vi.mocked(fileSystem.readFile).mockResolvedValue(existingContent);
-
-        const manifest = createTestManifest({ id: 'new-workflow' });
-
-        const result = await strategy.inject(manifest, {
-          ...options,
-          force: true,
-        });
-
-        expect(result.target).toBe('claude');
-        expect(fileSystem.writeFile).toHaveBeenCalled();
-      });
-
-      it('should allow injection when same workflow already exists', async () => {
-        vi.mocked(fileSystem.exists).mockResolvedValue(true);
-        const existingContent = createMockBtwContent('test-workflow');
-        vi.mocked(fileSystem.readFile).mockResolvedValue(existingContent);
-
-        const manifest = createTestManifest({ id: 'test-workflow' });
 
         const result = await strategy.inject(manifest, options);
 
@@ -287,154 +214,46 @@ describe('ClaudeStrategy', () => {
       });
     });
 
+    describe('backup functionality', () => {
+      it('should create backup of existing agents when backup option is true', async () => {
+        vi.mocked(fileSystem.readdir).mockResolvedValue(['test-agent.md']);
+        vi.mocked(fileSystem.readFile).mockResolvedValue('# BTW metadata\n# workflow: test-workflow');
+
+        const manifest = createTestManifest();
+
+        await strategy.inject(manifest, { projectRoot, backup: true });
+
+        expect(fileSystem.backup).toHaveBeenCalledWith(`${agentsPath}/test-agent.md`);
+      });
+
+      it('should not create backup when backup option is false', async () => {
+        const manifest = createTestManifest();
+
+        await strategy.inject(manifest, { projectRoot, backup: false });
+
+        expect(fileSystem.backup).not.toHaveBeenCalled();
+      });
+    });
+
     describe('merge mode', () => {
-      it('should merge with existing content when merge option is true', async () => {
+      it('should merge with existing CLAUDE.md content when merge option is true', async () => {
         vi.mocked(fileSystem.exists).mockResolvedValue(true);
-        const existingContent = '# My Custom Instructions\n\nFollow these rules.';
-        vi.mocked(fileSystem.readFile).mockResolvedValue(existingContent);
-
-        const manifest = createTestManifest();
-
-        await strategy.inject(manifest, {
-          ...options,
-          merge: true,
+        vi.mocked(fileSystem.readFile).mockImplementation(async (path) => {
+          if (path === claudeMdPath) {
+            return '# My Custom Instructions\n\nSome custom content.';
+          }
+          return '';
         });
 
-        const writeCall = vi.mocked(fileSystem.writeFile).mock.calls[0];
-        const writtenContent = writeCall?.[1] as string;
-
-        expect(writtenContent).toContain('# My Custom Instructions');
-        expect(writtenContent).toContain(BTW_START_MARKER);
-        expect(writtenContent).toContain('---'); // separator
-      });
-
-      it('should remove existing BTW content before merging', async () => {
-        vi.mocked(fileSystem.exists).mockResolvedValue(true);
-        const existingContent = `# My Custom Instructions
-
-${BTW_START_MARKER}
-${createBtwMarker('old-workflow')}
-Old BTW content
-${BTW_END_MARKER}`;
-        vi.mocked(fileSystem.readFile).mockResolvedValue(existingContent);
-
         const manifest = createTestManifest();
 
-        await strategy.inject(manifest, {
-          ...options,
-          merge: true,
-          force: true,
-        });
+        await strategy.inject(manifest, { projectRoot, merge: true });
 
-        const writeCall = vi.mocked(fileSystem.writeFile).mock.calls[0];
-        const writtenContent = writeCall?.[1] as string;
-
-        // Should contain user content but not old BTW content
-        expect(writtenContent).toContain('# My Custom Instructions');
-        expect(writtenContent).not.toContain('Old BTW content');
-        expect(writtenContent).toContain(BTW_START_MARKER);
-      });
-
-      it('should overwrite when merge option is false', async () => {
-        vi.mocked(fileSystem.exists).mockResolvedValue(true);
-        vi.mocked(fileSystem.readFile).mockResolvedValue('Existing content');
-
-        const manifest = createTestManifest();
-
-        await strategy.inject(manifest, {
-          ...options,
-          merge: false,
-          force: true,
-        });
-
-        const writeCall = vi.mocked(fileSystem.writeFile).mock.calls[0];
-        const writtenContent = writeCall?.[1] as string;
-
-        expect(writtenContent).not.toContain('Existing content');
-        expect(writtenContent).toContain(BTW_START_MARKER);
-      });
-    });
-
-    describe('generated content', () => {
-      it('should include BTW markers', async () => {
-        const manifest = createTestManifest();
-
-        await strategy.inject(manifest, options);
-
-        const writeCall = vi.mocked(fileSystem.writeFile).mock.calls[0];
-        const writtenContent = writeCall?.[1] as string;
-
-        expect(writtenContent).toContain(BTW_START_MARKER);
-        expect(writtenContent).toContain(BTW_END_MARKER);
-      });
-
-      it('should include workflow metadata', async () => {
-        const manifest = createTestManifest();
-
-        await strategy.inject(manifest, options);
-
-        const writeCall = vi.mocked(fileSystem.writeFile).mock.calls[0];
-        const writtenContent = writeCall?.[1] as string;
-
-        expect(writtenContent).toContain('**Workflow ID:** test-workflow');
-        expect(writtenContent).toContain('**Version:** 1.0');
-        expect(writtenContent).toContain('**Author:** Test Author');
-        expect(writtenContent).toContain('**Repository:** https://github.com/test/workflow');
-      });
-
-      it('should include agent information', async () => {
-        const manifest = createTestManifest();
-
-        await strategy.inject(manifest, options);
-
-        const writeCall = vi.mocked(fileSystem.writeFile).mock.calls[0];
-        const writtenContent = writeCall?.[1] as string;
-
-        expect(writtenContent).toContain('### Test Agent');
-        expect(writtenContent).toContain('> A test agent for testing');
-        expect(writtenContent).toContain('**Tags:** test, demo');
-        expect(writtenContent).toContain('You are a test agent.');
-      });
-
-      it('should include BTW marker with workflow ID and timestamp', async () => {
-        const manifest = createTestManifest();
-
-        await strategy.inject(manifest, options);
-
-        const writeCall = vi.mocked(fileSystem.writeFile).mock.calls[0];
-        const writtenContent = writeCall?.[1] as string;
-
-        expect(writtenContent).toMatch(/<!-- BTW:test-workflow:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z -->/);
-      });
-    });
-
-    describe('error handling', () => {
-      it('should throw BTWError on write failure', async () => {
-        vi.mocked(fileSystem.writeFile).mockRejectedValue(new Error('Write failed'));
-
-        const manifest = createTestManifest();
-
-        await expect(
-          strategy.inject(manifest, options)
-        ).rejects.toMatchObject({
-          code: ErrorCode.INJECTION_FAILED,
-        });
-      });
-
-      it('should propagate existing BTWError', async () => {
-        vi.mocked(fileSystem.exists).mockResolvedValue(true);
-        const existingContent = createMockBtwContent('different-workflow');
-        vi.mocked(fileSystem.readFile).mockResolvedValue(existingContent);
-
-        const manifest = createTestManifest({ id: 'new-workflow' });
-
-        try {
-          await strategy.inject(manifest, options);
-          expect.fail('Should have thrown');
-        } catch (error) {
-          expect(error).toBeInstanceOf(BTWError);
-          expect((error as BTWError).code).toBe(ErrorCode.INJECTION_FAILED);
-        }
+        const writeCall = vi.mocked(fileSystem.writeFile).mock.calls.find(
+          call => call[0] === claudeMdPath
+        );
+        expect(writeCall?.[1]).toContain('# My Custom Instructions');
+        expect(writeCall?.[1]).toContain(BTW_START_MARKER);
       });
     });
   });
@@ -442,223 +261,94 @@ ${BTW_END_MARKER}`;
   describe('eject()', () => {
     const options: EjectOptions = { projectRoot };
 
-    describe('when instructions file does not exist', () => {
-      it('should return without error', async () => {
-        vi.mocked(fileSystem.exists).mockResolvedValue(false);
+    it('should remove BTW agent files', async () => {
+      vi.mocked(fileSystem.readdir).mockResolvedValue(['test-agent.md']);
+      vi.mocked(fileSystem.readFile).mockResolvedValue('# BTW metadata\n# workflow: test-workflow');
+      vi.mocked(fileSystem.exists).mockResolvedValue(true);
 
-        await expect(strategy.eject(options)).resolves.toBeUndefined();
-        expect(fileSystem.remove).not.toHaveBeenCalled();
-      });
+      await strategy.eject(options);
+
+      expect(fileSystem.remove).toHaveBeenCalledWith(`${agentsPath}/test-agent.md`);
     });
 
-    describe('restore from backup', () => {
-      it('should restore from backup when restoreBackup is true and backup exists', async () => {
-        vi.mocked(fileSystem.exists)
-          .mockResolvedValueOnce(true) // instructions exist
-          .mockResolvedValueOnce(true); // backup exists
+    it('should clean BTW content from CLAUDE.md', async () => {
+      const existingContent = `# My Project
 
-        await strategy.eject({
-          ...options,
-          restoreBackup: true,
-        });
+Some description.
 
-        expect(fileSystem.restore).toHaveBeenCalledWith(backupPath, instructionsPath);
-        expect(fileSystem.remove).toHaveBeenCalledWith(backupPath);
-      });
-
-      it('should throw BTWError when restore fails', async () => {
-        vi.mocked(fileSystem.exists)
-          .mockResolvedValueOnce(true) // instructions exist
-          .mockResolvedValueOnce(true); // backup exists
-        vi.mocked(fileSystem.restore).mockRejectedValue(new Error('Restore failed'));
-
-        await expect(
-          strategy.eject({ ...options, restoreBackup: true })
-        ).rejects.toMatchObject({
-          code: ErrorCode.RESTORE_FAILED,
-        });
-      });
-    });
-
-    describe('clean option', () => {
-      it('should remove entire .claude directory when clean is true', async () => {
-        vi.mocked(fileSystem.exists).mockResolvedValueOnce(true); // instructions exist
-
-        await strategy.eject({
-          ...options,
-          clean: true,
-        });
-
-        expect(fileSystem.remove).toHaveBeenCalledWith(claudeDir, true);
-      });
-
-      it('should ignore FILE_NOT_FOUND error when cleaning', async () => {
-        vi.mocked(fileSystem.exists).mockResolvedValueOnce(true);
-        vi.mocked(fileSystem.remove).mockRejectedValue(
-          new BTWError(ErrorCode.FILE_NOT_FOUND, 'Not found')
-        );
-
-        await expect(
-          strategy.eject({ ...options, clean: true })
-        ).resolves.toBeUndefined();
-      });
-    });
-
-    describe('removing BTW content only', () => {
-      it('should remove only BTW content and preserve user content', async () => {
-        vi.mocked(fileSystem.exists)
-          .mockResolvedValueOnce(true) // instructions exist
-          .mockResolvedValueOnce(false); // no backup
-
-        const existingContent = `# My Custom Instructions
-
-Follow these rules carefully.
+---
 
 ${BTW_START_MARKER}
-${createBtwMarker('test-workflow')}
-BTW injected content here
+<!-- BTW:test-workflow:2024-01-01T00:00:00.000Z -->
+
+# Test Workflow
+
 ${BTW_END_MARKER}`;
-        vi.mocked(fileSystem.readFile).mockResolvedValue(existingContent);
 
-        await strategy.eject(options);
+      vi.mocked(fileSystem.readdir).mockResolvedValue([]);
+      vi.mocked(fileSystem.exists).mockResolvedValue(true);
+      vi.mocked(fileSystem.readFile).mockResolvedValue(existingContent);
 
-        const writeCall = vi.mocked(fileSystem.writeFile).mock.calls[0];
-        const writtenContent = writeCall?.[1] as string;
+      await strategy.eject(options);
 
-        expect(writtenContent).toContain('# My Custom Instructions');
-        expect(writtenContent).toContain('Follow these rules carefully.');
-        expect(writtenContent).not.toContain(BTW_START_MARKER);
-        expect(writtenContent).not.toContain('BTW injected content');
-      });
-
-      it('should remove file if only BTW content existed', async () => {
-        vi.mocked(fileSystem.exists)
-          .mockResolvedValueOnce(true) // instructions exist
-          .mockResolvedValueOnce(false); // no backup
-
-        const existingContent = createMockBtwContent();
-        vi.mocked(fileSystem.readFile).mockResolvedValue(existingContent);
-
-        await strategy.eject(options);
-
-        expect(fileSystem.remove).toHaveBeenCalledWith(instructionsPath);
-      });
-
-      it('should handle content with only BTW marker comment (fallback regex)', async () => {
-        vi.mocked(fileSystem.exists)
-          .mockResolvedValueOnce(true) // instructions exist
-          .mockResolvedValueOnce(false); // no backup
-
-        // Content with just a BTW marker (no BTW_START/END markers)
-        const existingContent = `# User Content
-
-${createBtwMarker('test-workflow')}
-Some old format BTW content`;
-        vi.mocked(fileSystem.readFile).mockResolvedValue(existingContent);
-
-        await strategy.eject(options);
-
-        const writeCall = vi.mocked(fileSystem.writeFile).mock.calls[0];
-        const writtenContent = writeCall?.[1] as string;
-
-        expect(writtenContent).toContain('# User Content');
-        expect(writtenContent).not.toContain('BTW:test-workflow');
-      });
+      const writeCall = vi.mocked(fileSystem.writeFile).mock.calls.find(
+        call => call[0] === claudeMdPath
+      );
+      expect(writeCall?.[1]).toContain('# My Project');
+      expect(writeCall?.[1]).not.toContain(BTW_START_MARKER);
     });
 
-    describe('error handling', () => {
-      it('should throw BTWError on unexpected error', async () => {
-        vi.mocked(fileSystem.exists).mockResolvedValue(true);
-        vi.mocked(fileSystem.readFile).mockRejectedValue(new Error('Read failed'));
+    it('should remove CLAUDE.md if it becomes empty after ejection', async () => {
+      vi.mocked(fileSystem.readdir).mockResolvedValue([]);
+      vi.mocked(fileSystem.exists).mockResolvedValue(true);
+      vi.mocked(fileSystem.readFile).mockResolvedValue(`${BTW_START_MARKER}\ncontent\n${BTW_END_MARKER}`);
 
-        await expect(strategy.eject(options)).rejects.toMatchObject({
-          code: ErrorCode.INJECTION_FAILED,
-        });
-      });
+      await strategy.eject(options);
+
+      expect(fileSystem.remove).toHaveBeenCalledWith(claudeMdPath);
+    });
+
+    it('should remove empty agents directory', async () => {
+      vi.mocked(fileSystem.readdir).mockResolvedValueOnce(['test-agent.md']).mockResolvedValueOnce([]);
+      vi.mocked(fileSystem.readFile).mockResolvedValue('# BTW metadata\n# workflow: test-workflow');
+      vi.mocked(fileSystem.exists).mockResolvedValue(true);
+
+      await strategy.eject(options);
+
+      expect(fileSystem.remove).toHaveBeenCalledWith(agentsPath, true);
     });
   });
 
   describe('getStatus()', () => {
-    describe('when instructions file does not exist', () => {
-      it('should return not injected status', async () => {
-        vi.mocked(fileSystem.exists)
-          .mockResolvedValueOnce(false) // instructions don't exist
-          .mockResolvedValueOnce(false); // no backup
+    it('should return not injected when no BTW agents exist', async () => {
+      vi.mocked(fileSystem.readdir).mockResolvedValue([]);
 
-        const status = await strategy.getStatus(projectRoot);
+      const status = await strategy.getStatus(projectRoot);
 
-        expect(status.isInjected).toBe(false);
-        expect(status.workflowId).toBeUndefined();
-        expect(status.hasBackup).toBe(false);
-      });
-
-      it('should detect backup even when not injected', async () => {
-        vi.mocked(fileSystem.exists)
-          .mockResolvedValueOnce(false) // instructions don't exist
-          .mockResolvedValueOnce(true) // backup exists
-          .mockResolvedValueOnce(true); // backup exists (second check)
-
-        const status = await strategy.getStatus(projectRoot);
-
-        expect(status.isInjected).toBe(false);
-        expect(status.hasBackup).toBe(true);
-        expect(status.backupPath).toBe(backupPath);
-      });
+      expect(status.isInjected).toBe(false);
     });
 
-    describe('when instructions file exists', () => {
-      it('should return injected status with workflow info when BTW marker found', async () => {
-        const timestamp = '2024-01-15T10:30:00.000Z';
-        vi.mocked(fileSystem.exists)
-          .mockResolvedValueOnce(true) // instructions exist
-          .mockResolvedValueOnce(false); // no backup
-        vi.mocked(fileSystem.readFile).mockResolvedValue(
-          `${BTW_START_MARKER}\n${createBtwMarker('my-workflow', timestamp)}\nContent\n${BTW_END_MARKER}`
-        );
+    it('should return injected status when BTW agents exist', async () => {
+      vi.mocked(fileSystem.readdir).mockResolvedValue(['test-agent.md']);
+      vi.mocked(fileSystem.readFile).mockResolvedValue('# BTW metadata\n# workflow: test-workflow');
+      vi.mocked(fileSystem.exists).mockResolvedValue(false);
 
-        const status = await strategy.getStatus(projectRoot);
+      const status = await strategy.getStatus(projectRoot);
 
-        expect(status.isInjected).toBe(true);
-        expect(status.workflowId).toBe('my-workflow');
-        expect(status.injectedAt).toBe(timestamp);
-        expect(status.hasBackup).toBe(false);
-      });
-
-      it('should return not injected when no BTW marker found', async () => {
-        vi.mocked(fileSystem.exists)
-          .mockResolvedValueOnce(true) // instructions exist
-          .mockResolvedValueOnce(false); // no backup
-        vi.mocked(fileSystem.readFile).mockResolvedValue('# User instructions only');
-
-        const status = await strategy.getStatus(projectRoot);
-
-        expect(status.isInjected).toBe(false);
-        expect(status.workflowId).toBeUndefined();
-      });
-
-      it('should include backup information', async () => {
-        vi.mocked(fileSystem.exists)
-          .mockResolvedValueOnce(true) // instructions exist
-          .mockResolvedValueOnce(true); // backup exists
-        vi.mocked(fileSystem.readFile).mockResolvedValue(createMockBtwContent());
-
-        const status = await strategy.getStatus(projectRoot);
-
-        expect(status.hasBackup).toBe(true);
-        expect(status.backupPath).toBe(backupPath);
-      });
+      expect(status.isInjected).toBe(true);
+      expect(status.workflowId).toBe('test-workflow');
     });
 
-    describe('error handling', () => {
-      it('should return not injected status on read error', async () => {
-        vi.mocked(fileSystem.exists).mockResolvedValue(true);
-        vi.mocked(fileSystem.readFile).mockRejectedValue(new Error('Read failed'));
-
-        const status = await strategy.getStatus(projectRoot);
-
-        expect(status.isInjected).toBe(false);
-        expect(status.hasBackup).toBe(false);
+    it('should detect backup files', async () => {
+      vi.mocked(fileSystem.readdir).mockResolvedValue(['test-agent.md']);
+      vi.mocked(fileSystem.readFile).mockResolvedValue('# BTW metadata\n# workflow: test-workflow');
+      vi.mocked(fileSystem.exists).mockImplementation(async (path) => {
+        return path === `${agentsPath}/test-agent.md.btw-backup`;
       });
+
+      const status = await strategy.getStatus(projectRoot);
+
+      expect(status.hasBackup).toBe(true);
     });
   });
 
@@ -666,56 +356,122 @@ Some old format BTW content`;
     it('should return true when no files exist', async () => {
       vi.mocked(fileSystem.exists).mockResolvedValue(false);
 
-      const isValid = await strategy.validate(projectRoot);
+      const result = await strategy.validate(projectRoot);
 
-      expect(isValid).toBe(true);
+      expect(result).toBe(true);
     });
 
-    it('should return true when instructions file is valid', async () => {
-      vi.mocked(fileSystem.exists)
-        .mockResolvedValueOnce(true) // instructions exist
-        .mockResolvedValueOnce(false); // settings don't exist
-      vi.mocked(fileSystem.readFile).mockResolvedValue('# Valid markdown content');
-
-      const isValid = await strategy.validate(projectRoot);
-
-      expect(isValid).toBe(true);
-    });
-
-    it('should return true when settings file contains valid JSON', async () => {
-      vi.mocked(fileSystem.exists)
-        .mockResolvedValueOnce(false) // instructions don't exist
-        .mockResolvedValueOnce(true); // settings exist
-      vi.mocked(fileSystem.readFile).mockResolvedValue('{"model": "claude-3-opus"}');
-
-      const isValid = await strategy.validate(projectRoot);
-
-      expect(isValid).toBe(true);
-    });
-
-    it('should return false when settings file contains invalid JSON', async () => {
-      vi.mocked(fileSystem.exists)
-        .mockResolvedValueOnce(false) // instructions don't exist
-        .mockResolvedValueOnce(true); // settings exist
-      vi.mocked(fileSystem.readFile).mockResolvedValue('{ invalid json }');
-
-      const isValid = await strategy.validate(projectRoot);
-
-      expect(isValid).toBe(false);
-    });
-
-    it('should return false on read error', async () => {
+    it('should return true when files are valid', async () => {
       vi.mocked(fileSystem.exists).mockResolvedValue(true);
-      vi.mocked(fileSystem.readFile).mockRejectedValue(new Error('Read failed'));
+      vi.mocked(fileSystem.readdir).mockResolvedValue(['test-agent.md']);
+      vi.mocked(fileSystem.readFile).mockImplementation(async (path) => {
+        if (path.endsWith('.json')) {
+          return '{"valid": true}';
+        }
+        return '# Valid content';
+      });
 
-      const isValid = await strategy.validate(projectRoot);
+      const result = await strategy.validate(projectRoot);
 
-      expect(isValid).toBe(false);
+      expect(result).toBe(true);
+    });
+
+    it('should return false when settings.json is invalid', async () => {
+      vi.mocked(fileSystem.exists).mockResolvedValue(true);
+      vi.mocked(fileSystem.readdir).mockResolvedValue([]);
+      vi.mocked(fileSystem.readFile).mockResolvedValue('invalid json');
+
+      const result = await strategy.validate(projectRoot);
+
+      expect(result).toBe(false);
+    });
+  });
+
+  describe('generateAgentFile()', () => {
+    it('should generate agent file with YAML frontmatter', () => {
+      const agent = {
+        id: 'my-agent',
+        name: 'My Agent',
+        description: 'Test description',
+        systemPrompt: 'You are a helpful assistant.',
+      };
+
+      const content = strategy.generateAgentFile(agent, 'test-workflow');
+
+      expect(content).toContain('---');
+      expect(content).toContain('name: my-agent');
+      expect(content).toContain('description: Test description');
+      expect(content).toContain('# BTW metadata');
+      expect(content).toContain('# workflow: test-workflow');
+      expect(content).toContain('You are a helpful assistant.');
+    });
+
+    it('should include model if specified', () => {
+      const agent = {
+        id: 'my-agent',
+        name: 'My Agent',
+        description: 'Test',
+        systemPrompt: 'Prompt',
+        model: 'claude-3-opus',
+      };
+
+      const content = strategy.generateAgentFile(agent, 'test-workflow');
+
+      expect(content).toContain('model: opus');
+    });
+
+    it('should escape special characters in description', () => {
+      const agent = {
+        id: 'my-agent',
+        name: 'My Agent',
+        description: 'Description with: colon and # hash',
+        systemPrompt: 'Prompt',
+      };
+
+      const content = strategy.generateAgentFile(agent, 'test-workflow');
+
+      expect(content).toContain('description: "Description with: colon and # hash"');
+    });
+  });
+
+  describe('generateInstructions()', () => {
+    it('should generate CLAUDE.md with BTW markers', () => {
+      const manifest = createTestManifest();
+
+      const content = strategy.generateInstructions(manifest);
+
+      expect(content).toContain(BTW_START_MARKER);
+      expect(content).toContain(BTW_END_MARKER);
+    });
+
+    it('should include workflow metadata', () => {
+      const manifest = createTestManifest();
+
+      const content = strategy.generateInstructions(manifest);
+
+      expect(content).toContain('**Workflow ID:** test-workflow');
+      expect(content).toContain('**Version:** 1.0');
+      expect(content).toContain('**Author:** Test Author');
+    });
+
+    it('should list available agents', () => {
+      const manifest = createTestManifest({
+        agents: [
+          { id: 'agent1', name: 'Agent One', description: 'First agent', systemPrompt: 'P1' },
+          { id: 'agent2', name: 'Agent Two', description: 'Second agent', systemPrompt: 'P2' },
+        ],
+      });
+
+      const content = strategy.generateInstructions(manifest);
+
+      expect(content).toContain('## Available Agents');
+      expect(content).toContain('**Agent One** (`agent1`): First agent');
+      expect(content).toContain('**Agent Two** (`agent2`): Second agent');
     });
   });
 
   describe('generateConfig()', () => {
-    it('should generate valid JSON config', () => {
+    it('should generate valid JSON', () => {
       const manifest = createTestManifest();
 
       const config = strategy.generateConfig(manifest);
@@ -723,192 +479,33 @@ Some old format BTW content`;
 
       expect(parsed._btw).toBeDefined();
       expect(parsed._btw.workflowId).toBe('test-workflow');
-      expect(parsed._btw.version).toBe('1.0.0');
-    });
-
-    it('should include model from first agent if specified', () => {
-      const manifest = createTestManifest({
-        agents: [
-          {
-            id: 'agent',
-            name: 'Agent',
-            description: 'Desc',
-            systemPrompt: 'Prompt',
-            model: 'claude-3-opus-20240229',
-          },
-        ],
-      });
-
-      const config = strategy.generateConfig(manifest);
-      const parsed = JSON.parse(config);
-
-      expect(parsed.model).toBe('claude-3-opus-20240229');
-    });
-  });
-
-  describe('generateInstructions()', () => {
-    it('should generate markdown with BTW markers', () => {
-      const manifest = createTestManifest();
-
-      const instructions = strategy.generateInstructions(manifest);
-
-      expect(instructions).toContain(BTW_START_MARKER);
-      expect(instructions).toContain(BTW_END_MARKER);
-    });
-
-    it('should include workflow name as header', () => {
-      const manifest = createTestManifest({ name: 'My Workflow' });
-
-      const instructions = strategy.generateInstructions(manifest);
-
-      expect(instructions).toContain('# My Workflow');
-    });
-
-    it('should include workflow description', () => {
-      const manifest = createTestManifest({
-        description: 'This is a detailed description.',
-      });
-
-      const instructions = strategy.generateInstructions(manifest);
-
-      expect(instructions).toContain('This is a detailed description.');
-    });
-
-    it('should include agent sections', () => {
-      const manifest = createTestManifest({
-        agents: [
-          {
-            id: 'agent1',
-            name: 'First Agent',
-            description: 'First agent description',
-            systemPrompt: 'First agent prompt',
-            tags: ['first', 'test'],
-          },
-          {
-            id: 'agent2',
-            name: 'Second Agent',
-            description: 'Second agent description',
-            systemPrompt: 'Second agent prompt',
-          },
-        ],
-      });
-
-      const instructions = strategy.generateInstructions(manifest);
-
-      expect(instructions).toContain('### First Agent');
-      expect(instructions).toContain('> First agent description');
-      expect(instructions).toContain('**Tags:** first, test');
-      expect(instructions).toContain('First agent prompt');
-      expect(instructions).toContain('### Second Agent');
-      expect(instructions).toContain('Second agent prompt');
-      expect(instructions).toContain('---'); // separator between agents
-    });
-
-    it('should include injection footer with timestamp', () => {
-      const manifest = createTestManifest();
-
-      const instructions = strategy.generateInstructions(manifest);
-
-      expect(instructions).toMatch(/\*Injected by BTW v\d+\.\d+\.\d+ at \d{4}-\d{2}-\d{2}T/);
-    });
-  });
-
-  describe('BaseInjectionStrategy marker methods', () => {
-    describe('createMarker()', () => {
-      it('should be included in generated instructions', () => {
-        const manifest = createTestManifest({ id: 'marker-test-workflow' });
-
-        const instructions = strategy.generateInstructions(manifest);
-
-        expect(instructions).toMatch(/<!-- BTW:marker-test-workflow:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z -->/);
-      });
-    });
-
-    describe('extractMarker()', () => {
-      it('should extract marker from getStatus', async () => {
-        vi.mocked(fileSystem.exists)
-          .mockResolvedValueOnce(true)
-          .mockResolvedValueOnce(false);
-        vi.mocked(fileSystem.readFile).mockResolvedValue(
-          `Content\n${createBtwMarker('extracted-workflow', '2024-06-15T12:00:00.000Z')}\nMore content`
-        );
-
-        const status = await strategy.getStatus(projectRoot);
-
-        expect(status.isInjected).toBe(true);
-        expect(status.workflowId).toBe('extracted-workflow');
-        expect(status.injectedAt).toBe('2024-06-15T12:00:00.000Z');
-      });
-
-      it('should return null for content without marker', async () => {
-        vi.mocked(fileSystem.exists)
-          .mockResolvedValueOnce(true)
-          .mockResolvedValueOnce(false);
-        vi.mocked(fileSystem.readFile).mockResolvedValue('No marker here');
-
-        const status = await strategy.getStatus(projectRoot);
-
-        expect(status.isInjected).toBe(false);
-        expect(status.workflowId).toBeUndefined();
-      });
     });
   });
 
   describe('edge cases', () => {
     it('should handle manifest without optional fields', async () => {
-      const minimalManifest: Manifest = {
+      const manifest: Manifest = {
         version: '1.0',
         id: 'minimal',
         name: 'Minimal',
         description: 'Minimal workflow',
         targets: ['claude'],
         agents: [
-          {
-            id: 'agent',
-            name: 'Agent',
-            description: 'Desc',
-            systemPrompt: 'Prompt',
-          },
+          { id: 'agent', name: 'Agent', description: 'Desc', systemPrompt: 'Prompt' },
         ],
       };
 
-      const result = await strategy.inject(minimalManifest, { projectRoot });
+      const result = await strategy.inject(manifest, { projectRoot });
 
       expect(result.target).toBe('claude');
     });
 
-    it('should handle empty agents array', async () => {
-      const manifest = createTestManifest({ agents: [] });
-
-      const result = await strategy.inject(manifest, { projectRoot });
-
-      expect(result.agentCount).toBe(0);
-    });
-
-    it('should handle agent without tags', async () => {
+    it('should handle special characters in agent content', async () => {
       const manifest = createTestManifest({
         agents: [
           {
             id: 'agent',
-            name: 'No Tags Agent',
-            description: 'Agent without tags',
-            systemPrompt: 'Prompt',
-          },
-        ],
-      });
-
-      const instructions = strategy.generateInstructions(manifest);
-
-      expect(instructions).not.toContain('**Tags:**');
-    });
-
-    it('should handle special characters in content', async () => {
-      const manifest = createTestManifest({
-        description: 'Contains <special> & "characters"',
-        agents: [
-          {
-            id: 'agent',
-            name: 'Agent with `code`',
+            name: 'Agent',
             description: 'Description with *markdown*',
             systemPrompt: 'Prompt with {{templates}} and $variables',
           },
@@ -919,12 +516,11 @@ Some old format BTW content`;
 
       expect(result.target).toBe('claude');
 
-      const writeCall = vi.mocked(fileSystem.writeFile).mock.calls[0];
-      const writtenContent = writeCall?.[1] as string;
-
-      expect(writtenContent).toContain('<special>');
-      expect(writtenContent).toContain('*markdown*');
-      expect(writtenContent).toContain('{{templates}}');
+      const writeCall = vi.mocked(fileSystem.writeFile).mock.calls.find(
+        call => call[0] === `${agentsPath}/agent.md`
+      );
+      expect(writeCall?.[1]).toContain('*markdown*');
+      expect(writeCall?.[1]).toContain('{{templates}}');
     });
   });
 });

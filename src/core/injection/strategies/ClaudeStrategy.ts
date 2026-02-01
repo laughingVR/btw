@@ -1,9 +1,13 @@
 /**
  * BTW - Claude Injection Strategy
  * Handles injection into Claude Code's configuration
+ *
+ * Creates:
+ * - .claude/agents/{agent-id}.md - Individual agent files with YAML frontmatter
+ * - CLAUDE.md - Project-level workflow information
  */
 
-import { AITarget, Manifest, InjectionResult } from '../../../types/index.js';
+import { AITarget, Manifest, InjectionResult, AgentDefinition } from '../../../types/index.js';
 import { BTWError, ErrorCode } from '../../../types/errors.js';
 import {
   BaseInjectionStrategy,
@@ -16,24 +20,6 @@ import { pathResolver } from '../../../infrastructure/fs/PathResolver.js';
 import path from 'path';
 
 /**
- * Claude-specific configuration structure
- */
-interface ClaudeConfig {
-  /** Custom instructions for Claude */
-  instructions?: string;
-  /** Model preferences */
-  model?: string;
-  /** Additional settings */
-  settings?: Record<string, unknown>;
-  /** BTW metadata */
-  _btw?: {
-    workflowId: string;
-    injectedAt: string;
-    version: string;
-  };
-}
-
-/**
  * BTW content markers for identifying injected content
  */
 const BTW_START_MARKER = '<!-- BTW_START -->';
@@ -42,88 +28,94 @@ const BTW_VERSION = '1.0.0';
 
 /**
  * Injection strategy for Claude Code
- * Handles .claude/settings.json and .claude/instructions.md
+ * Creates .claude/agents/*.md files and CLAUDE.md
  */
 export class ClaudeStrategy extends BaseInjectionStrategy {
   readonly target: AITarget = 'claude';
 
   /**
    * Inject workflow into Claude configuration
+   * Creates individual agent files in .claude/agents/ directory
    * @param manifest - Workflow manifest
    * @param options - Injection options
    */
   async inject(manifest: Manifest, options: InjectOptions): Promise<InjectionResult> {
     const paths = pathResolver.resolveAiToolPaths(options.projectRoot, 'claude');
-    const { instructionsPath } = paths;
-    const claudeDir = path.dirname(instructionsPath);
+    const { instructionsPath, agentsPath } = paths;
+    const claudeDir = path.join(options.projectRoot, '.claude');
 
     let backupCreated = false;
     let backupPath: string | undefined;
+    const agentFilePaths: string[] = [];
 
     try {
-      // 1. Create .claude directory if needed
+      // 1. Create .claude and .claude/agents directories
       await fileSystem.mkdir(claudeDir);
+      if (agentsPath) {
+        await fileSystem.mkdir(agentsPath);
+      }
 
-      // 2. Check if instructions file exists
-      const instructionsExist = await fileSystem.exists(instructionsPath);
-
-      // 3. Create backup if requested and file exists
-      if (options.backup && instructionsExist) {
-        try {
-          backupPath = await fileSystem.backup(instructionsPath);
-          backupCreated = true;
-        } catch (error) {
-          throw new BTWError(
-            ErrorCode.BACKUP_FAILED,
-            `Failed to create backup of ${instructionsPath}`,
-            { cause: error instanceof Error ? error : undefined }
-          );
+      // 2. Check for existing BTW agents if not forcing
+      if (!options.force && agentsPath) {
+        const existingAgents = await this.findBtwAgents(agentsPath);
+        if (existingAgents.length > 0) {
+          // Check if they belong to a different workflow
+          const existingWorkflowId = await this.getWorkflowIdFromAgents(agentsPath);
+          if (existingWorkflowId && existingWorkflowId !== manifest.id) {
+            throw new BTWError(
+              ErrorCode.INJECTION_FAILED,
+              `A different workflow (${existingWorkflowId}) is already injected. Use --force to override.`,
+              {
+                context: {
+                  existingWorkflowId,
+                  newWorkflowId: manifest.id,
+                },
+              }
+            );
+          }
         }
       }
 
-      // 4. Check for existing BTW marker if not forcing
-      if (!options.force && instructionsExist) {
-        const existingContent = await fileSystem.readFile(instructionsPath);
-        const existingMarker = this.extractMarker(existingContent);
-
-        if (existingMarker && existingMarker.workflowId !== manifest.id) {
-          throw new BTWError(
-            ErrorCode.INJECTION_FAILED,
-            `A different workflow (${existingMarker.workflowId}) is already injected. Use --force to override.`,
-            {
-              context: {
-                existingWorkflowId: existingMarker.workflowId,
-                newWorkflowId: manifest.id,
-              },
+      // 3. Create backup of existing agents if requested
+      if (options.backup && agentsPath) {
+        const existingAgents = await this.findBtwAgents(agentsPath);
+        if (existingAgents.length > 0) {
+          // Backup by creating .btw-backup copies
+          for (const agentFile of existingAgents) {
+            try {
+              await fileSystem.backup(agentFile);
+              backupCreated = true;
+            } catch {
+              // Continue if backup fails for individual files
             }
-          );
+          }
         }
       }
 
-      // 5. Generate instructions content
-      const btwContent = this.generateInstructions(manifest);
-
-      // 6. Handle merge option
-      let finalContent: string;
-      if (options.merge && instructionsExist) {
-        const existingContent = await fileSystem.readFile(instructionsPath);
-        // Remove any existing BTW content first
-        const cleanedContent = this.removeBtwContent(existingContent);
-        // Append new BTW content with separator
-        finalContent = cleanedContent.trim()
-          ? `${cleanedContent.trim()}\n\n---\n\n${btwContent}`
-          : btwContent;
-      } else {
-        finalContent = btwContent;
+      // 4. Remove existing BTW agents if forcing
+      if (options.force && agentsPath) {
+        const existingAgents = await this.findBtwAgents(agentsPath);
+        for (const agentFile of existingAgents) {
+          await fileSystem.remove(agentFile);
+        }
       }
 
-      // 7. Write instructions file
-      await fileSystem.writeFile(instructionsPath, finalContent, { createDirs: true });
+      // 5. Create agent files
+      for (const agent of manifest.agents) {
+        const agentContent = this.generateAgentFile(agent, manifest.id);
+        const agentFilePath = path.join(agentsPath!, `${agent.id}.md`);
+        await fileSystem.writeFile(agentFilePath, agentContent, { createDirs: true });
+        agentFilePaths.push(agentFilePath);
+      }
 
-      // 8. Return injection result
+      // 6. Create or update CLAUDE.md with workflow info
+      await this.updateClaudeMd(instructionsPath, manifest, options);
+
+      // 7. Return injection result
       return {
         target: 'claude',
         configPath: instructionsPath,
+        agentPaths: agentFilePaths,
         agentCount: manifest.agents.length,
         backupCreated,
         backupPath,
@@ -146,61 +138,55 @@ export class ClaudeStrategy extends BaseInjectionStrategy {
    */
   async eject(options: EjectOptions): Promise<void> {
     const paths = pathResolver.resolveAiToolPaths(options.projectRoot, 'claude');
-    const { instructionsPath } = paths;
-    const claudeDir = path.dirname(instructionsPath);
-    const backupPath = `${instructionsPath}.btw-backup`;
+    const { instructionsPath, agentsPath } = paths;
+    const claudeDir = path.join(options.projectRoot, '.claude');
 
     try {
-      // 1. Check if instructions file exists
-      const instructionsExist = await fileSystem.exists(instructionsPath);
-
-      if (!instructionsExist) {
-        // Nothing to eject
-        return;
-      }
-
-      // 2. Check if backup exists
-      const backupExists = await fileSystem.exists(backupPath);
-
-      // 3. Handle restore from backup
-      if (options.restoreBackup && backupExists) {
-        try {
-          await fileSystem.restore(backupPath, instructionsPath);
-          // Remove backup after restore
-          await fileSystem.remove(backupPath);
-          return;
-        } catch (error) {
-          throw new BTWError(
-            ErrorCode.RESTORE_FAILED,
-            `Failed to restore from backup: ${backupPath}`,
-            { cause: error instanceof Error ? error : undefined }
-          );
-        }
-      }
-
-      // 4. Handle clean option - remove entire .claude directory
-      if (options.clean) {
-        try {
-          await fileSystem.remove(claudeDir, true);
-          return;
-        } catch (error) {
-          // Directory might not exist, that's ok
-          if (!(error instanceof BTWError && error.code === ErrorCode.FILE_NOT_FOUND)) {
-            throw error;
+      // 1. Remove BTW agent files
+      if (agentsPath) {
+        const btwAgents = await this.findBtwAgents(agentsPath);
+        for (const agentFile of btwAgents) {
+          await fileSystem.remove(agentFile);
+          // Also remove backup if exists
+          const backupFile = `${agentFile}.btw-backup`;
+          if (await fileSystem.exists(backupFile)) {
+            await fileSystem.remove(backupFile);
           }
         }
-        return;
+
+        // Check if agents directory is empty and remove it
+        try {
+          const remainingFiles = await fileSystem.readdir(agentsPath);
+          if (remainingFiles.length === 0) {
+            await fileSystem.remove(agentsPath, true);
+          }
+        } catch {
+          // Directory might not exist, that's ok
+        }
       }
 
-      // 5. Remove only BTW content while preserving user content
-      const existingContent = await fileSystem.readFile(instructionsPath);
-      const cleanedContent = this.removeBtwContent(existingContent);
+      // 2. Clean BTW content from CLAUDE.md
+      if (await fileSystem.exists(instructionsPath)) {
+        const content = await fileSystem.readFile(instructionsPath);
+        const cleanedContent = this.removeBtwContent(content);
 
-      // 6. Write back or remove file if empty
-      if (cleanedContent.trim()) {
-        await fileSystem.writeFile(instructionsPath, cleanedContent.trim() + '\n');
-      } else {
-        await fileSystem.remove(instructionsPath);
+        if (cleanedContent.trim()) {
+          await fileSystem.writeFile(instructionsPath, cleanedContent.trim() + '\n');
+        } else {
+          await fileSystem.remove(instructionsPath);
+        }
+      }
+
+      // 3. Handle clean option - remove entire .claude directory if empty
+      if (options.clean) {
+        try {
+          const claudeContents = await fileSystem.readdir(claudeDir);
+          if (claudeContents.length === 0) {
+            await fileSystem.remove(claudeDir, true);
+          }
+        } catch {
+          // Directory might not exist, that's ok
+        }
       }
     } catch (error) {
       if (error instanceof BTWError) {
@@ -220,42 +206,39 @@ export class ClaudeStrategy extends BaseInjectionStrategy {
    */
   async getStatus(projectRoot: string): Promise<InjectionStatus> {
     const paths = pathResolver.resolveAiToolPaths(projectRoot, 'claude');
-    const { instructionsPath } = paths;
-    const backupPath = `${instructionsPath}.btw-backup`;
+    const { agentsPath } = paths;
 
     try {
-      // 1. Check if instructions file exists
-      const instructionsExist = await fileSystem.exists(instructionsPath);
-
-      if (!instructionsExist) {
-        return {
-          isInjected: false,
-          hasBackup: await fileSystem.exists(backupPath),
-          backupPath: (await fileSystem.exists(backupPath)) ? backupPath : undefined,
-        };
+      if (!agentsPath) {
+        return { isInjected: false, hasBackup: false };
       }
 
-      // 2. Read content and extract marker
-      const content = await fileSystem.readFile(instructionsPath);
-      const marker = this.extractMarker(content);
+      // Check for BTW agent files
+      const btwAgents = await this.findBtwAgents(agentsPath);
 
-      // 3. Check if backup exists
-      const backupExists = await fileSystem.exists(backupPath);
+      if (btwAgents.length === 0) {
+        return { isInjected: false, hasBackup: false };
+      }
 
-      // 4. Return status
+      // Get workflow ID from first agent
+      const workflowId = await this.getWorkflowIdFromAgents(agentsPath);
+
+      // Check for backups
+      let hasBackup = false;
+      for (const agentFile of btwAgents) {
+        if (await fileSystem.exists(`${agentFile}.btw-backup`)) {
+          hasBackup = true;
+          break;
+        }
+      }
+
       return {
-        isInjected: marker !== null,
-        workflowId: marker?.workflowId,
-        injectedAt: marker?.timestamp,
-        hasBackup: backupExists,
-        backupPath: backupExists ? backupPath : undefined,
+        isInjected: true,
+        workflowId: workflowId || undefined,
+        hasBackup,
       };
-    } catch (error) {
-      // If we can't read the file, assume not injected
-      return {
-        isInjected: false,
-        hasBackup: false,
-      };
+    } catch {
+      return { isInjected: false, hasBackup: false };
     }
   }
 
@@ -265,22 +248,25 @@ export class ClaudeStrategy extends BaseInjectionStrategy {
    */
   async validate(projectRoot: string): Promise<boolean> {
     const paths = pathResolver.resolveAiToolPaths(projectRoot, 'claude');
-    const { instructionsPath, configPath } = paths;
+    const { agentsPath, configPath } = paths;
 
     try {
-      // 1. Check instructions file if it exists
-      const instructionsExist = await fileSystem.exists(instructionsPath);
-      if (instructionsExist) {
-        try {
-          await fileSystem.readFile(instructionsPath);
-        } catch {
-          return false;
+      // Check agents directory if it exists
+      if (agentsPath && await fileSystem.exists(agentsPath)) {
+        const files = await fileSystem.readdir(agentsPath);
+        for (const file of files) {
+          if (file.endsWith('.md')) {
+            try {
+              await fileSystem.readFile(path.join(agentsPath, file));
+            } catch {
+              return false;
+            }
+          }
         }
       }
 
-      // 2. Check settings file if it exists
-      const settingsExist = await fileSystem.exists(configPath);
-      if (settingsExist) {
+      // Check settings file if it exists
+      if (await fileSystem.exists(configPath)) {
         try {
           const content = await fileSystem.readFile(configPath);
           JSON.parse(content);
@@ -289,7 +275,6 @@ export class ClaudeStrategy extends BaseInjectionStrategy {
         }
       }
 
-      // 3. Files don't exist yet - valid state
       return true;
     } catch {
       return false;
@@ -301,12 +286,7 @@ export class ClaudeStrategy extends BaseInjectionStrategy {
    * @param manifest - Workflow manifest
    */
   generateConfig(manifest: Manifest): string {
-    const config: ClaudeConfig = {};
-
-    // Only include defined values
-    if (manifest.agents[0]?.model) {
-      config.model = manifest.agents[0].model;
-    }
+    const config: Record<string, unknown> = {};
 
     // Add BTW metadata
     config._btw = {
@@ -319,7 +299,47 @@ export class ClaudeStrategy extends BaseInjectionStrategy {
   }
 
   /**
-   * Generate Claude instructions.md content
+   * Generate a Claude agent file with YAML frontmatter
+   * @param agent - Agent definition
+   * @param workflowId - Parent workflow ID for tracking
+   */
+  generateAgentFile(agent: AgentDefinition, workflowId: string): string {
+    const lines: string[] = [];
+
+    // YAML frontmatter
+    lines.push('---');
+    lines.push(`name: ${agent.id}`);
+    lines.push(`description: ${this.escapeYamlString(agent.description)}`);
+
+    // Optional fields
+    if (agent.model) {
+      // Map model names to Claude's expected format
+      const modelMap: Record<string, string> = {
+        'claude-3-opus': 'opus',
+        'claude-3-sonnet': 'sonnet',
+        'claude-3-haiku': 'haiku',
+        'claude-opus-4': 'opus',
+        'claude-sonnet-4': 'sonnet',
+      };
+      const mappedModel = modelMap[agent.model] || agent.model;
+      lines.push(`model: ${mappedModel}`);
+    }
+
+    // BTW metadata for tracking
+    lines.push(`# BTW metadata`);
+    lines.push(`# workflow: ${workflowId}`);
+    lines.push(`# injected: ${new Date().toISOString()}`);
+    lines.push('---');
+    lines.push('');
+
+    // Agent instructions (system prompt)
+    lines.push(agent.systemPrompt);
+
+    return lines.join('\n');
+  }
+
+  /**
+   * Generate CLAUDE.md content with workflow metadata
    * @param manifest - Workflow manifest
    */
   generateInstructions(manifest: Manifest): string {
@@ -353,40 +373,20 @@ export class ClaudeStrategy extends BaseInjectionStrategy {
     }
     lines.push('');
 
-    // Agent sections
+    // List available agents
     if (manifest.agents.length > 0) {
-      lines.push('## Agents');
+      lines.push('## Available Agents');
+      lines.push('');
+      lines.push('This workflow provides the following specialized agents:');
       lines.push('');
 
-      manifest.agents.forEach((agent, index) => {
-        lines.push(`### ${agent.name}`);
-        lines.push('');
-
-        if (agent.description) {
-          lines.push(`> ${agent.description}`);
-          lines.push('');
-        }
-
-        if (agent.tags && agent.tags.length > 0) {
-          lines.push(`**Tags:** ${agent.tags.join(', ')}`);
-          lines.push('');
-        }
-
-        lines.push('#### Instructions');
-        lines.push('');
-        lines.push(agent.systemPrompt);
-        lines.push('');
-
-        // Add separator between agents (except for last)
-        if (index < manifest.agents.length - 1) {
-          lines.push('---');
-          lines.push('');
-        }
-      });
+      for (const agent of manifest.agents) {
+        lines.push(`- **${agent.name}** (\`${agent.id}\`): ${agent.description}`);
+      }
+      lines.push('');
     }
 
     // Footer
-    lines.push('');
     lines.push('---');
     lines.push('');
     lines.push(`*Injected by BTW v${BTW_VERSION} at ${new Date().toISOString()}*`);
@@ -397,29 +397,118 @@ export class ClaudeStrategy extends BaseInjectionStrategy {
   }
 
   /**
-   * Get the path to Claude's instructions file
-   * @param projectRoot - Project root directory
+   * Update CLAUDE.md with workflow information
    */
-  private getInstructionsPath(projectRoot: string): string {
-    const paths = pathResolver.resolveAiToolPaths(projectRoot, 'claude');
-    return paths.instructionsPath;
+  private async updateClaudeMd(
+    claudeMdPath: string,
+    manifest: Manifest,
+    options: InjectOptions
+  ): Promise<void> {
+    const btwContent = this.generateInstructions(manifest);
+    const exists = await fileSystem.exists(claudeMdPath);
+
+    if (options.merge && exists) {
+      const existingContent = await fileSystem.readFile(claudeMdPath);
+      const cleanedContent = this.removeBtwContent(existingContent);
+      const finalContent = cleanedContent.trim()
+        ? `${cleanedContent.trim()}\n\n---\n\n${btwContent}`
+        : btwContent;
+      await fileSystem.writeFile(claudeMdPath, finalContent);
+    } else if (exists && !options.force) {
+      // Check if it already has BTW content
+      const existingContent = await fileSystem.readFile(claudeMdPath);
+      if (existingContent.includes(BTW_START_MARKER)) {
+        // Replace existing BTW content
+        const cleanedContent = this.removeBtwContent(existingContent);
+        const finalContent = cleanedContent.trim()
+          ? `${cleanedContent.trim()}\n\n---\n\n${btwContent}`
+          : btwContent;
+        await fileSystem.writeFile(claudeMdPath, finalContent);
+      } else {
+        // Append BTW content
+        await fileSystem.writeFile(claudeMdPath, `${existingContent.trim()}\n\n---\n\n${btwContent}`);
+      }
+    } else {
+      await fileSystem.writeFile(claudeMdPath, btwContent);
+    }
   }
 
   /**
-   * Get the path to Claude's settings file
-   * @param projectRoot - Project root directory
+   * Find all BTW-injected agent files in agents directory
    */
-  private getSettingsPath(projectRoot: string): string {
-    const paths = pathResolver.resolveAiToolPaths(projectRoot, 'claude');
-    return paths.configPath;
+  private async findBtwAgents(agentsPath: string): Promise<string[]> {
+    const btwAgents: string[] = [];
+
+    try {
+      const files = await fileSystem.readdir(agentsPath);
+
+      for (const file of files) {
+        if (!file.endsWith('.md') || file.endsWith('.btw-backup')) {
+          continue;
+        }
+
+        const filePath = path.join(agentsPath, file);
+        try {
+          const content = await fileSystem.readFile(filePath);
+          // Check if this agent was created by BTW
+          if (content.includes('# BTW metadata') || content.includes('# workflow:')) {
+            btwAgents.push(filePath);
+          }
+        } catch {
+          // Skip files we can't read
+        }
+      }
+    } catch {
+      // Directory doesn't exist yet
+    }
+
+    return btwAgents;
   }
 
   /**
-   * Remove BTW content from existing instructions
-   * @param content - Existing instructions content
+   * Get workflow ID from existing BTW agents
+   */
+  private async getWorkflowIdFromAgents(agentsPath: string): Promise<string | null> {
+    try {
+      const files = await fileSystem.readdir(agentsPath);
+
+      for (const file of files) {
+        if (!file.endsWith('.md') || file.endsWith('.btw-backup')) {
+          continue;
+        }
+
+        const filePath = path.join(agentsPath, file);
+        const content = await fileSystem.readFile(filePath);
+
+        // Look for workflow comment in frontmatter
+        const match = content.match(/# workflow: (.+)/);
+        if (match) {
+          return match[1].trim();
+        }
+      }
+    } catch {
+      // Directory doesn't exist
+    }
+
+    return null;
+  }
+
+  /**
+   * Escape a string for use in YAML
+   */
+  private escapeYamlString(str: string): string {
+    // If the string contains special characters, wrap in quotes
+    if (str.includes(':') || str.includes('#') || str.includes('\n') ||
+        str.startsWith(' ') || str.endsWith(' ')) {
+      return `"${str.replace(/"/g, '\\"')}"`;
+    }
+    return str;
+  }
+
+  /**
+   * Remove BTW content from existing CLAUDE.md
    */
   private removeBtwContent(content: string): string {
-    // Remove content between BTW markers
     const startIndex = content.indexOf(BTW_START_MARKER);
     const endIndex = content.indexOf(BTW_END_MARKER);
 
@@ -429,9 +518,7 @@ export class ClaudeStrategy extends BaseInjectionStrategy {
       return (before + after).trim();
     }
 
-    // Fallback: Try to remove content based on BTW marker comment
-    const markerRegex = /<!-- BTW:[^:]+:[^>]+ -->[\s\S]*$/;
-    return content.replace(markerRegex, '').trim();
+    return content;
   }
 }
 

@@ -59,10 +59,11 @@ export const MANIFEST_VERSION = '1.0';
 export const AI_TOOL_MAPPINGS: Record<AITarget, AiToolConfig> = {
   claude: {
     configPath: '.claude/settings.json',
-    instructionsPath: '.claude/instructions.md',
+    instructionsPath: 'CLAUDE.md',
     projectConfigPath: '.claude/project.json',
+    agentsPath: '.claude/agents',
     supportsSystemPrompt: true,
-    supportsMultiAgent: false,
+    supportsMultiAgent: true,
   },
   cursor: {
     configPath: '.cursor/settings.json',
@@ -97,6 +98,8 @@ export interface AiToolConfig {
   instructionsPath: string;
   /** Path to project-specific configuration */
   projectConfigPath: string;
+  /** Path to agents directory (for tools that support multi-agent) */
+  agentsPath?: string;
   /** Whether the tool supports custom system prompts */
   supportsSystemPrompt: boolean;
   /** Whether the tool supports multiple agents */

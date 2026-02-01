@@ -23,6 +23,7 @@ vi.mock('../../../infrastructure/fs/FileSystem.js', () => ({
     remove: vi.fn().mockResolvedValue(undefined),
     backup: vi.fn().mockResolvedValue('/test/backup.btw-backup'),
     restore: vi.fn().mockResolvedValue(undefined),
+    readdir: vi.fn().mockResolvedValue([]),
   },
 }));
 
@@ -31,8 +32,9 @@ vi.mock('../../../infrastructure/fs/PathResolver.js', () => ({
   pathResolver: {
     resolveAiToolPaths: vi.fn((projectRoot: string, target: string) => ({
       configPath: `${projectRoot}/.${target}/settings.json`,
-      instructionsPath: `${projectRoot}/.${target}/instructions.md`,
+      instructionsPath: target === 'claude' ? `${projectRoot}/CLAUDE.md` : `${projectRoot}/.${target}/instructions.md`,
       projectConfigPath: `${projectRoot}/.${target}/project.json`,
+      agentsPath: target === 'claude' ? `${projectRoot}/.claude/agents` : undefined,
     })),
     normalize: vi.fn((path: string) => path),
   },

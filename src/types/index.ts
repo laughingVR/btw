@@ -159,6 +159,8 @@ export interface InjectionResult {
   target: AITarget;
   /** Path to the injected configuration file */
   configPath: string;
+  /** Paths to individual agent files (for multi-agent targets) */
+  agentPaths?: string[];
   /** Number of agents injected */
   agentCount: number;
   /** Whether a backup was created */

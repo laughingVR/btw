@@ -31,6 +31,8 @@ export interface AiToolPaths {
   instructionsPath: string;
   /** Path to the AI tool's project config */
   projectConfigPath: string;
+  /** Path to the AI tool's agents directory (for multi-agent support) */
+  agentsPath?: string;
 }
 
 /**
@@ -108,6 +110,9 @@ export class PathResolver {
       configPath: path.join(normalizedRoot, toolConfig.configPath),
       instructionsPath: path.join(normalizedRoot, toolConfig.instructionsPath),
       projectConfigPath: path.join(normalizedRoot, toolConfig.projectConfigPath),
+      agentsPath: toolConfig.agentsPath
+        ? path.join(normalizedRoot, toolConfig.agentsPath)
+        : undefined,
     };
   }
 
